@@ -7,6 +7,9 @@
 #include <inttypes.h>
 #include <time.h> // For seeding random number generator
 
+// Define the number of threads, adjust as needed
+#define NUM_THREADS 4 // Set this to the number of threads you plan to use
+
 int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget,
 	uint32_t max_nonce, unsigned long *hashes_done)
