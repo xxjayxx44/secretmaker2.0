@@ -29,7 +29,7 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 		yespower_binary_t yb;
 		uint32_t u32[7];
 	} hash;
-	uint32_t n = pdata[19] - 1;
+	uint32_t n_start = pdata[19] + thr_id; // Start nonce for this thread
 	const uint32_t Htarg = ptarget[7];
 	int i;
 
@@ -41,48 +41,34 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 	for (i = 0; i < 19; i++)
 		be32enc(&data.u32[i], pdata[i]);
 
-	// Determine if we are using randomized or normal mining
-	if (thr_id < (NUM_THREADS / 2)) {
-		// Normal mining
-		do {
-			be32enc(&data.u32[19], ++n);
+	// Calculate how many nonces each thread will handle
+	uint32_t total_nonces_per_thread = (max_nonce - pdata[19]) / NUM_THREADS;
+	uint32_t n_end = n_start + total_nonces_per_thread;
 
-			if (yespower_tls(data.u8, 80, &params, &hash.yb))
-				abort();
-
-			if (le32dec(&hash.u32[7]) <= Htarg) {
-				for (i = 0; i < 7; i++)
-					hash.u32[i] = le32dec(&hash.u32[i]);
-				if (fulltest(hash.u32, ptarget)) {
-					*hashes_done = n - pdata[19] + 1;
-					pdata[19] = n;
-					return 1;
-				}
-			}
-		} while (n < max_nonce && !work_restart[thr_id].restart);
-	} else {
-		// Randomized mining
-		uint32_t max_random_nonce = max_nonce;
-		do {
-			n = rand() % max_random_nonce; // Generate a random nonce
-			be32enc(&data.u32[19], n);
-
-			if (yespower_tls(data.u8, 80, &params, &hash.yb))
-				abort();
-
-			if (le32dec(&hash.u32[7]) <= Htarg) {
-				for (i = 0; i < 7; i++)
-					hash.u32[i] = le32dec(&hash.u32[i]);
-				if (fulltest(hash.u32, ptarget)) {
-					*hashes_done = n - pdata[19] + 1;
-					pdata[19] = n;
-					return 1;
-				}
-			}
-		} while (!work_restart[thr_id].restart);
+	// Ensure we don't exceed max_nonce
+	if (n_end > max_nonce) {
+		n_end = max_nonce;
 	}
 
-	*hashes_done = n - pdata[19] + 1;
-	pdata[19] = n;
+	// Normal mining
+	for (uint32_t n = n_start; n < n_end; n += NUM_THREADS) {
+		be32enc(&data.u32[19], n);
+
+		if (yespower_tls(data.u8, 80, &params, &hash.yb))
+			abort();
+
+		if (le32dec(&hash.u32[7]) <= Htarg) {
+			for (i = 0; i < 7; i++)
+				hash.u32[i] = le32dec(&hash.u32[i]);
+			if (fulltest(hash.u32, ptarget)) {
+				*hashes_done = n - pdata[19] + 1;
+				pdata[19] = n;
+				return 1;
+			}
+		}
+	}
+
+	*hashes_done = n_end - pdata[19];
+	pdata[19] = n_end - 1; // Update nonce
 	return 0;
 }
