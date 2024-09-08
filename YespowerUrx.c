@@ -6,7 +6,7 @@
 #include <string.h>
 #include <inttypes.h>
 
-#define NUM_THREADS 4 // Set this to the number of threads you plan to use
+#define NUM_THREADS 4 // Define the number of threads used
 
 int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget,
@@ -34,21 +34,15 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 	for (i = 0; i < 19; i++)
 		be32enc(&data.u32[i], pdata[i]);
 
-	// Calculate nonce range for this thread
+	// Calculate the range of nonces for this thread
 	uint32_t total_nonces = max_nonce - pdata[19];
 	uint32_t nonces_per_thread = total_nonces / NUM_THREADS;
 	uint32_t n_start = pdata[19] + thr_id * nonces_per_thread;
-	uint32_t n_end = n_start + nonces_per_thread;
+	uint32_t n_end = (thr_id == NUM_THREADS - 1) ? max_nonce : n_start + nonces_per_thread;
 
-	if (thr_id == NUM_THREADS - 1) {
-		n_end = max_nonce; // Ensure the last thread checks all remaining nonces
-	}
-
-	// Use a loop to find valid hashes
+	// Loop through the assigned range of nonces
 	for (n = n_start; n < n_end; n++) {
-		// Use bit manipulation or randomization to explore nonce space
-		uint32_t nonce = n ^ (n >> 5); // Simple bit manipulation for better distribution
-		be32enc(&data.u32[19], nonce);
+		be32enc(&data.u32[19], n);
 
 		if (yespower_tls(data.u8, 80, &params, &hash.yb))
 			abort();
@@ -57,14 +51,14 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 			for (i = 0; i < 7; i++)
 				hash.u32[i] = le32dec(&hash.u32[i]);
 			if (fulltest(hash.u32, ptarget)) {
-				*hashes_done = nonce - pdata[19] + 1;
-				pdata[19] = nonce; // Update the current nonce
-				return 1; // Found a valid hash
+				*hashes_done = n - pdata[19] + 1;
+				pdata[19] = n; // Update the current nonce
+				return 1; // Found valid hash
 			}
 		}
 	}
 
-	*hashes_done = n_end - pdata[19];
+	*hashes_done = n_end - pdata[19]; // Update the total hashes done
 	pdata[19] = n_end; // Update the current nonce
 	return 0; // No valid hash found
 }
