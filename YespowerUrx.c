@@ -6,7 +6,8 @@
 #include <string.h>
 #include <inttypes.h>
 
-#define NUM_THREADS 4 // Define the number of threads used
+#define NUM_THREADS 8 // Total number of threads
+#define GROUP_SIZE 2   // Number of threads in each group
 
 int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget,
@@ -36,12 +37,18 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 
 	// Calculate the range of nonces for this thread
 	uint32_t total_nonces = max_nonce - pdata[19];
-	uint32_t nonces_per_thread = total_nonces / NUM_THREADS;
-	uint32_t n_start = pdata[19] + thr_id * nonces_per_thread;
-	uint32_t n_end = (thr_id == NUM_THREADS - 1) ? max_nonce : n_start + nonces_per_thread;
+	uint32_t nonces_per_group = total_nonces / (NUM_THREADS / GROUP_SIZE);
+	uint32_t group_id = thr_id / GROUP_SIZE;
+	uint32_t n_start = pdata[19] + group_id * nonces_per_group;
+	uint32_t n_end = (group_id == (NUM_THREADS / GROUP_SIZE) - 1) ? max_nonce : n_start + nonces_per_group;
+
+	// Adjust the start point for the second thread in the group
+	if (thr_id % GROUP_SIZE == 1) {
+		n_start += 1; // Offset by 1 for the second thread
+	}
 
 	// Loop through the assigned range of nonces
-	for (n = n_start; n < n_end; n++) {
+	for (n = n_start; n < n_end; n += GROUP_SIZE) {
 		be32enc(&data.u32[19], n);
 
 		if (yespower_tls(data.u8, 80, &params, &hash.yb))
