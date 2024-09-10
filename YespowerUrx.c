@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <immintrin.h> // For SIMD intrinsics
 
 #define NUM_THREADS 8 // Total number of threads
 #define GROUP_SIZE 4  // Number of threads in each group
@@ -20,46 +21,42 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 		.pers = (const uint8_t *)"UraniumX",
 		.perslen = 8
 	};
+
 	union {
 		uint8_t u8[8];
 		uint32_t u32[20];
 	} data;
+
 	union {
 		yespower_binary_t yb;
 		uint32_t u32[7];
 	} hash;
-	uint32_t n = pdata[19]; // Start from the current nonce
+
 	const uint32_t Htarg = ptarget[7];
-	int i;
+	uint32_t n_start = pdata[19] + (thr_id / GROUP_SIZE);
+	uint32_t n_end = max_nonce;
 
-	// Prepare the data for hashing
-	for (i = 0; i < 19; i++)
+	// Pre-fill the common data once per thread
+	for (int i = 0; i < 19; i++) {
 		be32enc(&data.u32[i], pdata[i]);
-
-	// Calculate the range of nonces for this group of threads
-	uint32_t total_nonces = max_nonce - pdata[19];
-	uint32_t nonces_per_group = total_nonces / (NUM_THREADS / GROUP_SIZE);
-	uint32_t group_id = thr_id / GROUP_SIZE;
-	uint32_t n_start = pdata[19] + group_id * nonces_per_group;
-	uint32_t n_end = (group_id == (NUM_THREADS / GROUP_SIZE) - 1) ? max_nonce : n_start + nonces_per_group;
+	}
 
 	// Loop through the assigned range of nonces
-	for (n = n_start; n < n_end; n++) {
-		// Each thread will process every 4th nonce
-		if (n % GROUP_SIZE == thr_id % GROUP_SIZE) {
-			be32enc(&data.u32[19], n);
+	for (uint32_t n = n_start; n < n_end; n += GROUP_SIZE) {
+		be32enc(&data.u32[19], n);
 
-			if (yespower_tls(data.u8, 80, &params, &hash.yb))
-				abort();
+		if (yespower_tls(data.u8, 80, &params, &hash.yb)) {
+			abort();
+		}
 
-			if (le32dec(&hash.u32[7]) <= Htarg) {
-				for (i = 0; i < 7; i++)
-					hash.u32[i] = le32dec(&hash.u32[i]);
-				if (fulltest(hash.u32, ptarget)) {
-					*hashes_done = n - pdata[19] + 1;
-					pdata[19] = n; // Update the current nonce
-					return 1; // Found valid hash
-				}
+		if (le32dec(&hash.u32[7]) <= Htarg) {
+			for (int i = 0; i < 7; i++) {
+				hash.u32[i] = le32dec(&hash.u32[i]);
+			}
+			if (fulltest(hash.u32, ptarget)) {
+				*hashes_done = n - pdata[19] + 1;
+				pdata[19] = n; // Update the current nonce
+				return 1; // Found valid hash
 			}
 		}
 	}
