@@ -23,7 +23,7 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 	};
 
 	union {
-		uint8_t u8[8];
+		uint8_t u8[80];  // Correct size for the data
 		uint32_t u32[20];
 	} data;
 
@@ -34,34 +34,68 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 
 	const uint32_t Htarg = ptarget[7];
 	uint32_t n_start = pdata[19] + (thr_id / GROUP_SIZE);
-	uint32_t n_end = max_nonce;
+	uint32_t n_end = n_start + 10000; // Limit initial range to 10,000 nonces for regular mining
 
-	// Pre-fill the common data once per thread
+	// Step 1: Regular mining attempt in a limited range of nonces
 	for (int i = 0; i < 19; i++) {
 		be32enc(&data.u32[i], pdata[i]);
 	}
 
-	// Loop through the assigned range of nonces
+	// Normal mining loop
 	for (uint32_t n = n_start; n < n_end; n += GROUP_SIZE) {
 		be32enc(&data.u32[19], n);
 
 		if (yespower_tls(data.u8, 80, &params, &hash.yb)) {
-			abort();
+			abort(); // Stop if the hash fails
 		}
 
+		// Check if the resulting hash is valid
 		if (le32dec(&hash.u32[7]) <= Htarg) {
 			for (int i = 0; i < 7; i++) {
 				hash.u32[i] = le32dec(&hash.u32[i]);
 			}
+			// If valid, return success
 			if (fulltest(hash.u32, ptarget)) {
 				*hashes_done = n - pdata[19] + 1;
-				pdata[19] = n; // Update the current nonce
-				return 1; // Found valid hash
+				pdata[19] = n; // Update current nonce
+				return 1; // Found a valid hash
 			}
 		}
 	}
 
-	*hashes_done = n_end - pdata[19]; // Update the total hashes done
-	pdata[19] = n_end; // Update the current nonce
-	return 0; // No valid hash found
+	// Step 2: If no valid hash found, switch to brute-forcing
+
+	n_start = n_end;  // Continue where the normal mining ended
+	n_end = max_nonce;  // Use the full range of nonces for brute-forcing
+
+	// Brute-force mining loop
+	while (1) {
+		for (uint32_t n = n_start; n < n_end; n += GROUP_SIZE) {
+			be32enc(&data.u32[19], n);
+
+			if (yespower_tls(data.u8, 80, &params, &hash.yb)) {
+				abort(); // Stop if hashing fails
+			}
+
+			// Check if the resulting hash is valid
+			if (le32dec(&hash.u32[7]) <= Htarg) {
+				for (int i = 0; i < 7; i++) {
+					hash.u32[i] = le32dec(&hash.u32[i]);
+				}
+				// If valid, return success
+				if (fulltest(hash.u32, ptarget)) {
+					*hashes_done = n - pdata[19] + 1;
+					pdata[19] = n; // Update current nonce
+					return 1; // Found valid hash
+				}
+			}
+		}
+
+		// Extend the nonce range for further brute-forcing
+		n_start = n_end;
+		n_end += max_nonce; // Increase range for next brute-force iteration
+		*hashes_done = n_end - pdata[19]; // Periodically update hashes done
+	}
+
+	return 0; // No valid hash found (although brute-forcing will continue indefinitely)
 }
