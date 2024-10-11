@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include <immintrin.h> // For SIMD intrinsics
 
 #define NUM_THREADS 8 // Total number of threads
 #define GROUP_SIZE 4  // Number of threads in each group
