@@ -28,23 +28,23 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
     uint32_t *hash_u32 = (uint32_t *)malloc(7 * sizeof(uint32_t));
     if (!data_u8 || !hash_u32) {
         fprintf(stderr, "Memory allocation failed\n");
+        if (data_u8) free(data_u8);  // Free if partially allocated
+        if (hash_u32) free(hash_u32); // Free if partially allocated
         return 0; // Early return in case of failure
+    }
+
+    // Initialize data for hashing
+    for (int i = 0; i < 19; i++) {
+        be32enc(&data_u8[i * 4], pdata[i]); // Prepare data for hashing
     }
 
     uint32_t n = pdata[19];          // Start nonce
     const uint32_t Htarg = ptarget[7]; // Target threshold
     uint32x4_t target_vec = vdupq_n_u32(Htarg); // NEON vector for target comparison
 
-    // Load initial data and prepare for NEON
-    uint32x4_t neon_data[20];
-    for (int i = 0; i < 19; i++) {
-        neon_data[i] = vdupq_n_u32(pdata[i]);
-    }
-
     // Main mining loop with batch processing and extensive unrolling
     while (n < max_nonce) {
         for (int j = 0; j < UNROLL_FACTOR; j++) {
-            // Correctly calculate nonce_vector using j
             uint32x4_t nonce_vec = vaddq_u32(vdupq_n_u32(n), vdupq_n_u32(j * NONCE_BATCH_SIZE)); // Correct nonce calculation
 
             // Store nonce values in data array
