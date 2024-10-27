@@ -51,8 +51,12 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
             vst1q_u32((uint32_t *)&data_u8[76], nonce_vec); // Last 4 bytes hold nonce
 
             // Perform Yespower hashing on batched data
-            if (yespower_tls(data_u8, 80, &params, (yespower_binary_t *)hash_u32))
-                abort();
+            if (yespower_tls(data_u8, 80, &params, (yespower_binary_t *)hash_u32)) {
+                fprintf(stderr, "Hashing failed\n");
+                free(data_u8); // Free allocated memory
+                free(hash_u32); // Free allocated memory
+                return 0; // Return 0 if hashing fails
+            }
 
             // Bitwise comparison for multiple nonces in a batch
             uint32x4_t hash_vec = vld1q_u32(hash_u32);
@@ -64,12 +68,17 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
                 for (int i = 0; i < NONCE_BATCH_SIZE; i++) {
                     // Reload and verify in sequence if a valid nonce is found
                     data_u8[76] = (uint8_t)(n + j * NONCE_BATCH_SIZE + i); // Correct nonce assignment
-                    if (yespower_tls(data_u8, 80, &params, (yespower_binary_t *)hash_u32))
-                        abort();
+                    if (yespower_tls(data_u8, 80, &params, (yespower_binary_t *)hash_u32)) {
+                        fprintf(stderr, "Hashing failed for nonce %u\n", (n + j * NONCE_BATCH_SIZE + i));
+                        free(data_u8); // Free allocated memory
+                        free(hash_u32); // Free allocated memory
+                        return 0; // Return 0 if hashing fails
+                    }
 
                     if (le32dec(&hash_u32[7]) <= Htarg) {
-                        for (int k = 0; k < 7; k++)
+                        for (int k = 0; k < 7; k++) {
                             hash_u32[k] = le32dec(&hash_u32[k]);
+                        }
 
                         // Final hash validity check
                         if (fulltest(hash_u32, ptarget)) {
