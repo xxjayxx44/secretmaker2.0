@@ -1,31 +1,28 @@
+
 #include "cpuminer-config.h"
 #include "miner.h"
 #include "yespower-1.0.1/yespower.h"
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include <immintrin.h> // AVX2 intrinsics
-#include <thread>
-#include <vector>
+#include <pthread.h>  // Include pthread library
 
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
 #define NUM_THREADS 8  // Adjust based on available CPU cores
 
-static inline uint32_t decode_le32(const uint32_t *val) {
-    return le32dec(val);
-}
-
-static inline void encode_be32(uint32_t *dst, uint32_t val) {
-    be32enc(dst, val);
-}
+typedef struct {
+    int thr_id;
+    uint32_t *pdata;
+    const uint32_t *ptarget;
+    uint32_t max_nonce;
+    unsigned long *hashes_done;
+    int found;
+    uint32_t nonce_found;
+} thread_data_t;
 
 // Worker function for each thread
-void worker(int thr_id, uint32_t *restrict pdata,
-	const uint32_t *restrict ptarget,
-	uint32_t max_nonce, unsigned long *restrict hashes_done,
-	bool &found, uint32_t &nonce_found)
-{
+void *worker(void *arg) {
+    thread_data_t *data = (thread_data_t *)arg;
+
     static const yespower_params_t params = {
         .version = YESPOWER_1_0,
         .N = 2048,
@@ -37,75 +34,75 @@ void worker(int thr_id, uint32_t *restrict pdata,
     union {
         uint8_t u8[80];
         uint32_t u32[20];
-    } data __attribute__((aligned(32))); // 32-byte alignment for data
+    } thread_data __attribute__((aligned(32)));
 
     union {
         yespower_binary_t yb;
         uint32_t u32[7];
-    } hash __attribute__((aligned(32))); // 32-byte alignment for hash
+    } hash __attribute__((aligned(32)));
 
-    uint32_t n = pdata[19] - 1;
-    const uint32_t Htarg = decode_le32(&ptarget[7]);
+    uint32_t n = data->pdata[19] - 1;
+    const uint32_t Htarg = le32dec(&data->ptarget[7]);
     unsigned i;
 
-    // Unroll initial encoding loop
     for (i = 0; i < 19; i++) {
-        encode_be32(&data.u32[i], pdata[i]);
+        be32enc(&thread_data.u32[i], data->pdata[i]);
     }
 
-    // Prefetch frequently accessed data
-    __builtin_prefetch(&data, 0, 3);
-    __builtin_prefetch(&ptarget, 0, 3);
-
-    // AVX2 registers for SIMD
-    __m256i data_avx, hash_avx;
     do {
-        encode_be32(&data.u32[19], ++n);
+        be32enc(&thread_data.u32[19], ++n);
 
-        // Perform yespower hashing on batch of 8 in parallel with AVX2
-        data_avx = _mm256_load_si256((__m256i*)&data);
-        if (unlikely(yespower_tls((const uint8_t *)&data_avx, 80, &params, (yespower_binary_t *)&hash_avx))) {
-            abort();  // Rare error path
-        }
+        if (yespower_tls(thread_data.u8, 80, &params, &hash.yb))
+            pthread_exit(NULL);
 
-        // Early exit check with AVX
-        uint32_t* hash_res = (uint32_t*)&hash_avx;
-        if (likely(hash_res[7] <= Htarg)) {
-            // Full test on each element in the batch
-            for (int j = 0; j < 7; j++) {
-                hash_res[j] = decode_le32(&hash_res[j]);
-            }
-            if (likely(fulltest(hash_res, ptarget))) {
-                *hashes_done = n - pdata[19] + 1;
-                pdata[19] = n;
-                found = true;
-                nonce_found = n;
-                return;
+        if (le32dec(&hash.u32[7]) <= Htarg) {
+            for (i = 0; i < 7; i++)
+                hash.u32[i] = le32dec(&hash.u32[i]);
+            if (fulltest(hash.u32, data->ptarget)) {
+                *(data->hashes_done) = n - data->pdata[19] + 1;
+                data->pdata[19] = n;
+                data->found = 1;
+                data->nonce_found = n;
+                pthread_exit(NULL);
             }
         }
+    } while (n < data->max_nonce);
 
-        if (found) break;  // Exit if found by another thread
-    } while (likely(n < max_nonce && !work_restart[thr_id].restart));
-
-    *hashes_done = n - pdata[19] + 1;
-    pdata[19] = n;
+    *(data->hashes_done) = n - data->pdata[19] + 1;
+    data->pdata[19] = n;
+    pthread_exit(NULL);
 }
 
-// Entry function that launches threads
-int scanhash_urx_yespower(int thr_id, uint32_t *restrict pdata,
-	const uint32_t *restrict ptarget,
-	uint32_t max_nonce, unsigned long *restrict hashes_done)
+// Main function that launches threads
+int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget,
+	uint32_t max_nonce, unsigned long *hashes_done)
 {
-    std::vector<std::thread> threads;
-    bool found = false;
+    pthread_t threads[NUM_THREADS];
+    thread_data_t thread_data[NUM_THREADS];
+    int found = 0;
     uint32_t nonce_found = 0;
 
+    // Initialize and create threads
     for (int i = 0; i < NUM_THREADS; i++) {
-        threads.emplace_back(worker, i, pdata, ptarget, max_nonce, hashes_done, std::ref(found), std::ref(nonce_found));
+        thread_data[i].thr_id = i;
+        thread_data[i].pdata = pdata;
+        thread_data[i].ptarget = ptarget;
+        thread_data[i].max_nonce = max_nonce;
+        thread_data[i].hashes_done = hashes_done;
+        thread_data[i].found = 0;
+        thread_data[i].nonce_found = 0;
+
+        pthread_create(&threads[i], NULL, worker, (void *)&thread_data[i]);
     }
 
-    for (auto &t : threads) {
-        t.join();
+    // Join threads
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+        if (thread_data[i].found) {
+            found = 1;
+            nonce_found = thread_data[i].nonce_found;
+        }
     }
 
     if (found) {
