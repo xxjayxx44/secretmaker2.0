@@ -3,7 +3,8 @@
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
+ * modification, are permitted provided that the following conditions
+ * are met:
  * 1. Redistributions of source code must retain the above copyright
  *    notice, this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
@@ -32,66 +33,82 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <pthread.h>
 
-#define BATCH_SIZE 4 // Process multiple nonces at a time
+#define BATCH_SIZE 2
 
-int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
-	const uint32_t *ptarget,
-	uint32_t max_nonce, unsigned long *hashes_done)
-{
-	static const yespower_params_t params = {
-		.version = YESPOWER_1_0,
-		.N = 2048,
-		.r = 32,
-		.pers = (const uint8_t *)"UraniumX",
-		.perslen = 8
-	};
+typedef struct {
+    int thr_id;
+    uint32_t *pdata;
+    const uint32_t *ptarget;
+    uint32_t max_nonce;
+    unsigned long *hashes_done;
+} thread_data_t;
 
-	union {
-		uint8_t u8[80]; // Size required for yespower_tls
-		uint32_t u32[20];
-	} data;
+static const yespower_params_t params = {
+    .version = YESPOWER_1_0,
+    .N = 2048,
+    .r = 32,
+    .pers = (const uint8_t *)"UraniumX",
+    .perslen = 8
+};
 
-	union {
-		yespower_binary_t yb;
-		uint32_t u32[7];
-	} hash;
+void *scan_hash(void *arg) {
+    thread_data_t *data = (thread_data_t *)arg;
+    uint32_t n = data->pdata[19] - 1;
+    const uint32_t Htarg = data->ptarget[7];
 
-	uint32_t n = pdata[19] - 1;
-	const uint32_t Htarg = ptarget[7];
-	unsigned int i;
+    union {
+        uint8_t u8[8];
+        uint32_t u32[20];
+    } batch_data[BATCH_SIZE];
 
-	// Initialize data
-	for (i = 0; i < 19; i++)
-		be32enc(&data.u32[i], pdata[i]);
+    union {
+        yespower_binary_t yb;
+        uint32_t u32[7];
+    } hash;
 
-	uint32_t processed_hashes = 0; // Track total processed hashes
+    for (int i = 0; i < 19; i++) {
+        be32enc(&batch_data[0].u32[i], data->pdata[i]);
+    }
 
-	do {
-		// Batch processing for increased throughput
-		for (int j = 0; j < BATCH_SIZE && n < max_nonce; j++) {
-			be32enc(&data.u32[19], ++n);
+    while (n < data->max_nonce) {
+        for (int j = 0; j < BATCH_SIZE && n < data->max_nonce; ++j) {
+            be32enc(&batch_data[j].u32[19], ++n);
+            if (yespower_tls(batch_data[j].u8, 80, &params, &hash.yb)) {
+                // Handle error, possibly log or abort
+                abort();
+            }
 
-			if (yespower_tls(data.u8, sizeof(data.u8), &params, &hash.yb)) {
-				abort();
-			}
+            if (le32dec(&hash.u32[7]) <= Htarg) {
+                for (int k = 0; k < 7; k++) {
+                    hash.u32[k] = le32dec(&hash.u32[k]);
+                }
+                if (fulltest(hash.u32, data->ptarget)) {
+                    *(data->hashes_done) = n - data->pdata[19] + 1;
+                    data->pdata[19] = n;
+                    return NULL;  // Valid hash found, exit thread
+                }
+            }
+        }
+    }
 
-			if (le32dec(&hash.u32[7]) <= Htarg) {
-				for (i = 0; i < 7; i++)
-					hash.u32[i] = le32dec(&hash.u32[i]);
-
-				if (fulltest(hash.u32, ptarget)) {
-					*hashes_done = n - pdata[19] + 1;
-					pdata[19] = n; // Update nonce
-					return 1; // Found a valid hash
-				}
-			}
-			processed_hashes++;
-		}
-
-	} while (n < max_nonce && !work_restart[thr_id].restart);
-
-	*hashes_done = processed_hashes; // Return the number of hashes processed
-	pdata[19] = n; // Update last nonce attempted
-	return 0; // No valid hash found
+    *(data->hashes_done) = n - data->pdata[19] + 1;
+    data->pdata[19] = n;
+    return NULL;
 }
+
+int scanhash_urx_yespower(int thr_id, uint32_t *pdata, const uint32_t *ptarget, uint32_t max_nonce, unsigned long *hashes_done) {
+    pthread_t threads[BATCH_SIZE];
+    thread_data_t thread_data[BATCH_SIZE];
+
+    for (int i = 0; i < BATCH_SIZE; i++) {
+        thread_data[i] = (thread_data_t){thr_id, pdata, ptarget, max_nonce, hashes_done};
+        pthread_create(&threads[i], NULL, scan_hash, &thread_data[i]);
+    }
+
+    for (int i = 0; i < BATCH_SIZE; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    return 0;
