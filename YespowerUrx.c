@@ -1,12 +1,12 @@
 #include "cpuminer-config.h"
 #include "miner.h"
-
 #include "yespower-1.0.1/yespower.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 #include <arm_neon.h> // NEON for ARM optimizations
+#include <stdio.h>    // For printf
 
 #define NONCE_BATCH_SIZE 8 // Number of nonces processed per loop iteration
 #define UNROLL_FACTOR 4    // Additional unrolling for efficiency
@@ -27,6 +27,7 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
         uint8_t u8[80];
         uint32_t u32[20];
     } data;
+
     union {
         yespower_binary_t yb;
         uint32_t u32[7];
@@ -45,10 +46,11 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
     // Main mining loop with batch processing and extensive unrolling
     while (n < max_nonce) {
         for (int j = 0; j < UNROLL_FACTOR; j++) {
-            uint32x4_t nonce_vec = vaddq_u32(vdupq_n_u32(n), vld1q_dup_u32(&j * NONCE_BATCH_SIZE)); // Batch of nonces
+            // Correctly calculate nonce_vector using j
+            uint32x4_t nonce_vec = vaddq_u32(vdupq_n_u32(n), vdupq_n_u32(j * NONCE_BATCH_SIZE)); // Correct nonce calculation
 
             // Store nonce values in data array
-            vst1q_u32(&data.u32[19], nonce_vec);
+            vst1q_u32((uint32_t *)&data.u32[19], nonce_vec); // Last 4 bytes hold nonce
 
             // Perform Yespower hashing on batched data
             if (yespower_tls(data.u8, 80, &params, &hash.yb))
@@ -63,7 +65,7 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
             if (result_mask != 0) {
                 for (int i = 0; i < NONCE_BATCH_SIZE; i++) {
                     // Reload and verify in sequence if a valid nonce is found
-                    data.u32[19] = n + i * NONCE_BATCH_SIZE;
+                    data.u32[19] = n + j * NONCE_BATCH_SIZE + i; // Correct nonce assignment
                     if (yespower_tls(data.u8, 80, &params, &hash.yb))
                         abort();
 
@@ -73,15 +75,15 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 
                         // Final hash validity check
                         if (fulltest(hash.u32, ptarget)) {
-                            *hashes_done = (n + i * NONCE_BATCH_SIZE) - pdata[19] + 1;
-                            pdata[19] = n + i * NONCE_BATCH_SIZE;
-                            return 1;
+                            *hashes_done = (n + j * NONCE_BATCH_SIZE + i) - pdata[19] + 1;
+                            pdata[19] = n + j * NONCE_BATCH_SIZE + i;
+                            return 1; // Valid hash found
                         }
                     }
                 }
             }
         }
-        n += NONCE_BATCH_SIZE * UNROLL_FACTOR;
+        n += NONCE_BATCH_SIZE * UNROLL_FACTOR; // Increment nonce for the next batch
     }
 
     *hashes_done = n - pdata[19] + 1;
