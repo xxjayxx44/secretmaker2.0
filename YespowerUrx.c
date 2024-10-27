@@ -27,87 +27,71 @@
 
 #include "cpuminer-config.h"
 #include "miner.h"
-
 #include "yespower-1.0.1/yespower.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 
-static inline void encode_be32(uint32_t *dst, uint32_t val) {
-    be32enc(dst, val);
-}
-
-static inline uint32_t decode_le32(const uint32_t *val) {
-    return le32dec(val);
-}
+#define BATCH_SIZE 4 // Process multiple nonces at a time
 
 int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
-    const uint32_t *ptarget,
-    uint32_t max_nonce, unsigned long *hashes_done)
+	const uint32_t *ptarget,
+	uint32_t max_nonce, unsigned long *hashes_done)
 {
-    static const yespower_params_t params = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"UraniumX",
-        .perslen = 8
-    };
+	static const yespower_params_t params = {
+		.version = YESPOWER_1_0,
+		.N = 2048,
+		.r = 32,
+		.pers = (const uint8_t *)"UraniumX",
+		.perslen = 8
+	};
 
-    union {
-        uint8_t u8[80]; // Size needed for yespower_tls
-        uint32_t u32[20];
-    } data;
+	union {
+		uint8_t u8[80]; // Size required for yespower_tls
+		uint32_t u32[20];
+	} data;
 
-    union {
-        yespower_binary_t yb;
-        uint32_t u32[7];
-    } hash;
+	union {
+		yespower_binary_t yb;
+		uint32_t u32[7];
+	} hash;
 
-    uint32_t n = pdata[19] - 1; // Start from the previous nonce
-    const uint32_t Htarg = decode_le32(&ptarget[7]);
-    unsigned int i;
+	uint32_t n = pdata[19] - 1;
+	const uint32_t Htarg = ptarget[7];
+	unsigned int i;
 
-    // Prepare data once
-    for (i = 0; i < 19; i++) {
-        encode_be32(&data.u32[i], pdata[i]);
-    }
+	// Initialize data
+	for (i = 0; i < 19; i++)
+		be32enc(&data.u32[i], pdata[i]);
 
-    // Main hashing loop
-    unsigned long hashes_in_block = 0; // Track hashes in current block
-    const uint32_t nonce_limit = max_nonce - n; // Limit for nonce in this block
+	uint32_t processed_hashes = 0; // Track total processed hashes
 
-    // Unrolling the loop for more iterations within a single run
-    while (n < max_nonce && !work_restart[thr_id].restart) {
-        encode_be32(&data.u32[19], ++n);
-        
-        // Perform yespower hashing
-        if (yespower_tls(data.u8, sizeof(data.u8), &params, &hash.yb))
-            abort();
+	do {
+		// Batch processing for increased throughput
+		for (int j = 0; j < BATCH_SIZE && n < max_nonce; j++) {
+			be32enc(&data.u32[19], ++n);
 
-        // Check the hash against the target
-        if (decode_le32(&hash.u32[7]) <= Htarg) {
-            for (i = 0; i < 7; i++) {
-                hash.u32[i] = decode_le32(&hash.u32[i]);
-            }
+			if (yespower_tls(data.u8, sizeof(data.u8), &params, &hash.yb)) {
+				abort();
+			}
 
-            // Verify the hash with the fulltest function
-            if (fulltest(hash.u32, ptarget)) {
-                *hashes_done += 1; // Increment hashes_done for each found hash
-                pdata[19] = n; // Update the nonce in pdata
-            }
-        }
+			if (le32dec(&hash.u32[7]) <= Htarg) {
+				for (i = 0; i < 7; i++)
+					hash.u32[i] = le32dec(&hash.u32[i]);
 
-        // Increment hashes count after processing the nonce
-        hashes_in_block++;
+				if (fulltest(hash.u32, ptarget)) {
+					*hashes_done = n - pdata[19] + 1;
+					pdata[19] = n; // Update nonce
+					return 1; // Found a valid hash
+				}
+			}
+			processed_hashes++;
+		}
 
-        // Early exit if we've processed a certain number of hashes
-        if (hashes_in_block >= nonce_limit / 10) { // Process a fraction of the limit
-            hashes_in_block = 0; // Reset the block count
-            // Optionally add logic here to yield CPU or perform other tasks
-        }
-    }
+	} while (n < max_nonce && !work_restart[thr_id].restart);
 
-    pdata[19] = n; // Update the last nonce attempted
-    return 0; // No valid hash found
+	*hashes_done = processed_hashes; // Return the number of hashes processed
+	pdata[19] = n; // Update last nonce attempted
+	return 0; // No valid hash found
 }
