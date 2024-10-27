@@ -111,4 +111,5 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata, const uint32_t *ptarget, 
         pthread_join(threads[i], NULL);
     }
 
-    return 0;
+    return 0; // Closing the function properly
+} // Close any other open blocks if applicable
