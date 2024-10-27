@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include <arm_neon.h> // For NEON SIMD optimizations on ARM devices
+#include <arm_neon.h> // For NEON optimizations on ARM
 
 #define NUM_THREADS 8 // Total number of threads
 #define GROUP_SIZE 4  // Number of threads in each group
@@ -34,19 +34,20 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 		uint32_t u32[7];
 	} hash;
 
+	uint32x4_t neon_data[20]; // NEON data array for SIMD operations
 	const uint32_t Htarg = ptarget[7];
 	uint32_t n_start = pdata[19] + (thr_id * NONCE_STEP); // Staggered starting nonce
 	uint32_t n_end = n_start + max_nonce / GROUP_SIZE;    // Dynamic range
 
-	// Load initial data (excluding nonce) and initialize NEON SIMD vectors
+	// Load initial data into NEON vector array (excluding nonce)
 	for (int i = 0; i < 19; i++) {
-		data.u32[i] = vdupq_n_u32(pdata[i]); // Set all elements in NEON register to pdata[i]
+		neon_data[i] = vdupq_n_u32(pdata[i]); // Set all elements in NEON register to pdata[i]
 	}
 
 	// Brute-force mining loop over extended nonce range with batching and adaptive range
 	while (1) {
 		for (uint32_t n = n_start; n < n_end; n += GROUP_SIZE) {
-			data.u32[19] = n;  // Encode nonce directly
+			data.u32[19] = n;  // Set nonce
 
 			// Perform Yespower hashing
 			if (yespower_tls(data.u8, 80, &params, &hash.yb)) {
@@ -54,14 +55,9 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
 			}
 
 			// Optimized condition check with bitwise operations for the target
-			uint32x4_t hash_val = vld1q_u32(&hash.u32[4]); // Load last elements of hash
-			uint32x4_t Htarget = vdupq_n_u32(Htarg);       // Duplicate Htarg for comparison
-			uint32x4_t result = vandq_u32(hash_val, Htarget);
-
-			// Check if the hash meets the target
-			if (vgetq_lane_u32(result, 3) <= Htarg) {
+			if ((hash.u32[7] & Htarg) == Htarg) { // Faster condition check
 				for (int i = 0; i < 7; i++) {
-					hash.u32[i] = __builtin_bswap32(hash.u32[i]); // Byte swap for full validation
+					hash.u32[i] = le32dec(&hash.u32[i]);
 				}
 				// Validate full hash
 				if (fulltest(hash.u32, ptarget)) {
