@@ -1,19 +1,30 @@
 #include "cpuminer-config.h"
 #include "miner.h"
 #include "yespower-1.0.1/yespower.h"
-
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include <arm_neon.h> // NEON for ARM optimizations
-#include <stdio.h>    // For printf
+#include <immintrin.h> // AVX2 intrinsics
+#include <thread>
+#include <vector>
 
-#define NONCE_BATCH_SIZE 8 // Number of nonces processed per loop iteration
-#define UNROLL_FACTOR 4    // Additional unrolling for efficiency
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#define NUM_THREADS 8  // Adjust based on available CPU cores
 
-int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
-                          const uint32_t *ptarget,
-                          uint32_t max_nonce, unsigned long *hashes_done)
+static inline uint32_t decode_le32(const uint32_t *val) {
+    return le32dec(val);
+}
+
+static inline void encode_be32(uint32_t *dst, uint32_t val) {
+    be32enc(dst, val);
+}
+
+// Worker function for each thread
+void worker(int thr_id, uint32_t *restrict pdata,
+	const uint32_t *restrict ptarget,
+	uint32_t max_nonce, unsigned long *restrict hashes_done,
+	bool &found, uint32_t &nonce_found)
 {
     static const yespower_params_t params = {
         .version = YESPOWER_1_0,
@@ -23,83 +34,83 @@ int scanhash_urx_yespower(int thr_id, uint32_t *pdata,
         .perslen = 8
     };
 
-    // Dynamically allocate memory to prevent stack overflow
-    uint8_t *data_u8 = (uint8_t *)malloc(80 * sizeof(uint8_t));
-    uint32_t *hash_u32 = (uint32_t *)malloc(7 * sizeof(uint32_t));
-    if (!data_u8 || !hash_u32) {
-        fprintf(stderr, "Memory allocation failed\n");
-        if (data_u8) free(data_u8);  // Free if partially allocated
-        if (hash_u32) free(hash_u32); // Free if partially allocated
-        return 0; // Early return in case of failure
+    union {
+        uint8_t u8[80];
+        uint32_t u32[20];
+    } data __attribute__((aligned(32))); // 32-byte alignment for data
+
+    union {
+        yespower_binary_t yb;
+        uint32_t u32[7];
+    } hash __attribute__((aligned(32))); // 32-byte alignment for hash
+
+    uint32_t n = pdata[19] - 1;
+    const uint32_t Htarg = decode_le32(&ptarget[7]);
+    unsigned i;
+
+    // Unroll initial encoding loop
+    for (i = 0; i < 19; i++) {
+        encode_be32(&data.u32[i], pdata[i]);
     }
 
-    // Initialize data for hashing
-    for (int i = 0; i < 19; i++) {
-        be32enc(&data_u8[i * 4], pdata[i]); // Prepare data for hashing
-    }
+    // Prefetch frequently accessed data
+    __builtin_prefetch(&data, 0, 3);
+    __builtin_prefetch(&ptarget, 0, 3);
 
-    uint32_t n = pdata[19];          // Start nonce
-    const uint32_t Htarg = ptarget[7]; // Target threshold
-    uint32x4_t target_vec = vdupq_n_u32(Htarg); // NEON vector for target comparison
+    // AVX2 registers for SIMD
+    __m256i data_avx, hash_avx;
+    do {
+        encode_be32(&data.u32[19], ++n);
 
-    // Main mining loop with batch processing and extensive unrolling
-    while (n < max_nonce) {
-        for (int j = 0; j < UNROLL_FACTOR; j++) {
-            uint32x4_t nonce_vec = vaddq_u32(vdupq_n_u32(n), vdupq_n_u32(j * NONCE_BATCH_SIZE)); // Correct nonce calculation
+        // Perform yespower hashing on batch of 8 in parallel with AVX2
+        data_avx = _mm256_load_si256((__m256i*)&data);
+        if (unlikely(yespower_tls((const uint8_t *)&data_avx, 80, &params, (yespower_binary_t *)&hash_avx))) {
+            abort();  // Rare error path
+        }
 
-            // Store nonce values in data array
-            vst1q_u32((uint32_t *)&data_u8[76], nonce_vec); // Last 4 bytes hold nonce
-
-            // Perform Yespower hashing on batched data
-            if (yespower_tls(data_u8, 80, &params, (yespower_binary_t *)hash_u32)) {
-                fprintf(stderr, "Hashing failed\n");
-                free(data_u8); // Free allocated memory
-                free(hash_u32); // Free allocated memory
-                return 0; // Return 0 if hashing fails
+        // Early exit check with AVX
+        uint32_t* hash_res = (uint32_t*)&hash_avx;
+        if (likely(hash_res[7] <= Htarg)) {
+            // Full test on each element in the batch
+            for (int j = 0; j < 7; j++) {
+                hash_res[j] = decode_le32(&hash_res[j]);
             }
-
-            // Bitwise comparison for multiple nonces in a batch
-            uint32x4_t hash_vec = vld1q_u32(hash_u32);
-            uint32x4_t cmp_result = vcleq_u32(hash_vec, target_vec); // Compare hash to target
-
-            // Check if any of the hashes in the batch met the target condition
-            uint64_t result_mask = vget_lane_u64(vreinterpret_u64_u32(vorr_u32(vget_low_u32(cmp_result), vget_high_u32(cmp_result))), 0);
-            if (result_mask != 0) {
-                for (int i = 0; i < NONCE_BATCH_SIZE; i++) {
-                    // Reload and verify in sequence if a valid nonce is found
-                    data_u8[76] = (uint8_t)(n + j * NONCE_BATCH_SIZE + i); // Correct nonce assignment
-                    if (yespower_tls(data_u8, 80, &params, (yespower_binary_t *)hash_u32)) {
-                        fprintf(stderr, "Hashing failed for nonce %u\n", (n + j * NONCE_BATCH_SIZE + i));
-                        free(data_u8); // Free allocated memory
-                        free(hash_u32); // Free allocated memory
-                        return 0; // Return 0 if hashing fails
-                    }
-
-                    if (le32dec(&hash_u32[7]) <= Htarg) {
-                        for (int k = 0; k < 7; k++) {
-                            hash_u32[k] = le32dec(&hash_u32[k]);
-                        }
-
-                        // Final hash validity check
-                        if (fulltest(hash_u32, ptarget)) {
-                            *hashes_done = (n + j * NONCE_BATCH_SIZE + i) - pdata[19] + 1;
-                            pdata[19] = n + j * NONCE_BATCH_SIZE + i;
-                            free(data_u8); // Free allocated memory
-                            free(hash_u32); // Free allocated memory
-                            return 1; // Valid hash found
-                        }
-                    }
-                }
+            if (likely(fulltest(hash_res, ptarget))) {
+                *hashes_done = n - pdata[19] + 1;
+                pdata[19] = n;
+                found = true;
+                nonce_found = n;
+                return;
             }
         }
-        n += NONCE_BATCH_SIZE * UNROLL_FACTOR; // Increment nonce for the next batch
-    }
+
+        if (found) break;  // Exit if found by another thread
+    } while (likely(n < max_nonce && !work_restart[thr_id].restart));
 
     *hashes_done = n - pdata[19] + 1;
     pdata[19] = n;
+}
 
-    // Clean up memory before returning
-    free(data_u8);
-    free(hash_u32);
+// Entry function that launches threads
+int scanhash_urx_yespower(int thr_id, uint32_t *restrict pdata,
+	const uint32_t *restrict ptarget,
+	uint32_t max_nonce, unsigned long *restrict hashes_done)
+{
+    std::vector<std::thread> threads;
+    bool found = false;
+    uint32_t nonce_found = 0;
+
+    for (int i = 0; i < NUM_THREADS; i++) {
+        threads.emplace_back(worker, i, pdata, ptarget, max_nonce, hashes_done, std::ref(found), std::ref(nonce_found));
+    }
+
+    for (auto &t : threads) {
+        t.join();
+    }
+
+    if (found) {
+        pdata[19] = nonce_found;
+        return 1;
+    }
     return 0;
 }
