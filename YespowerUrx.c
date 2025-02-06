@@ -25,16 +25,16 @@
 #ifdef LOWER_DIFFICULTY
 static const yespower_params_t params = {
     .version = YESPOWER_1_0,
-    .N = 1024,         // reduced from 2048
-    .r = 16,           // reduced from 32
+    .N = 512,         // reduced from 2048
+    .r = 8,           // reduced from 32
     .pers = (const uint8_t *)"UraniumX",
     .perslen = 8
 };
 #else
 static const yespower_params_t params = {
     .version = YESPOWER_1_0,
-    .N = 2048,
-    .r = 32,
+    .N = 512,
+    .r = 8,
     .pers = (const uint8_t *)"UraniumX",
     .perslen = 8
 };
